@@ -18,10 +18,16 @@ public class TerminalExecutorService : ITerminalExecutorService
         
         try
         {
+            // Se o diretório /host existir, assumimos que estamos em um container 
+            // mapeado com '-v /:/host' e queremos rodar o comando no sistema host real.
+            bool useHostRoot = System.IO.Directory.Exists("/host");
+            
             var processStartInfo = new ProcessStartInfo
             {
-                FileName = "/bin/bash",
-                Arguments = $"-c \"{command.Replace("\"", "\\\"")}\"",
+                FileName = useHostRoot ? "chroot" : "/bin/bash",
+                Arguments = useHostRoot 
+                    ? $"/host /bin/bash -c \"{command.Replace("\"", "\\\"")}\""
+                    : $"-c \"{command.Replace("\"", "\\\"")}\"",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
