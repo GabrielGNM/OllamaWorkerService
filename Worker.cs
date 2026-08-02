@@ -12,7 +12,7 @@ public class Worker : BackgroundService
     private readonly ILogger<Worker> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ITerminalExecutorService _terminalExecutor;
-    private readonly string _ollamaModel = "hermes"; // Nome do modelo no Ollama
+    private readonly string _ollamaModel = "hermes";
 
     public Worker(
         ILogger<Worker> logger, 
@@ -26,9 +26,7 @@ public class Worker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Ollama Worker iniciado. Iniciando loop de conversação.");
-
-        // Define a ferramenta de terminal
+        // Define a ferramenta de terminal GENÉRICA
         var tools = new List<Tool>
         {
             new Tool
@@ -37,7 +35,7 @@ public class Worker : BackgroundService
                 Function = new FunctionDefinition
                 {
                     Name = "execute_terminal_command",
-                    Description = "Executa um comando de terminal no Ubuntu (bash) e retorna a saída. Utilize para checar o status do sistema, por exemplo: /opt/rocm/bin/rocm-smi.",
+                    Description = "Executa um comando de terminal (bash) e retorna a saída. Você tem permissão para executar qualquer comando no sistema Linux do usuário para buscar informações, modificar arquivos, instalar pacotes ou administrar o sistema.",
                     Parameters = new
                     {
                         type = "object",
@@ -46,7 +44,7 @@ public class Worker : BackgroundService
                             command = new
                             {
                                 type = "string",
-                                description = "O comando bash a ser executado."
+                                description = "O comando bash completo a ser executado."
                             }
                         },
                         required = new[] { "command" }
@@ -55,95 +53,103 @@ public class Worker : BackgroundService
             }
         };
 
-        // Histórico de mensagens inicial simulando um request de status da GPU
         var messages = new List<Message>
         {
             new Message
             {
-                Role = "user",
-                Content = "Verifique o status da GPU usando o rocm-smi e me informe a temperatura atual e o uso de VRAM."
+                Role = "system",
+                Content = "Você é um assistente de IA focado em administração de sistemas Linux. Você possui uma ferramenta (execute_terminal_command) que permite rodar qualquer comando bash no sistema hospedeiro. Sempre que o usuário pedir algo, pense no comando necessário, execute a ferramenta e, com a saída gerada, responda de forma útil e objetiva."
             }
         };
 
-        // Loop para lidar com chamadas contínuas se necessário
+        Console.WriteLine("==================================================");
+        Console.WriteLine("Ollama Linux Terminal Assistant Iniciado!");
+        Console.WriteLine("==================================================");
+
         while (!stoppingToken.IsCancellationRequested)
         {
-            try
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.Write("\n[Usuário]: ");
+            Console.ResetColor();
+
+            var userInput = await Task.Run(() => Console.ReadLine(), stoppingToken);
+            
+            if (string.IsNullOrWhiteSpace(userInput)) continue;
+            if (userInput.Equals("sair", StringComparison.OrdinalIgnoreCase) || userInput.Equals("exit", StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogInformation("Enviando requisição de Chat para o Ollama...");
-                
-                var request = new ChatRequest
-                {
-                    Model = _ollamaModel,
-                    Messages = messages,
-                    Tools = tools,
-                    Stream = false
-                };
-
-                var responseMessage = await SendChatRequestAsync(request, stoppingToken);
-                
-                if (responseMessage == null)
-                {
-                    _logger.LogWarning("Nenhuma resposta foi retornada pela API do Ollama. Tentando novamente em 5s.");
-                    await Task.Delay(5000, stoppingToken);
-                    continue;
-                }
-
-                // Adiciona a resposta do assistente no histórico
-                messages.Add(responseMessage);
-
-                // Se houver chamada para uma ferramenta
-                if (responseMessage.ToolCalls != null && responseMessage.ToolCalls.Any())
-                {
-                    foreach (var toolCall in responseMessage.ToolCalls)
-                    {
-                        if (toolCall.Function.Name == "execute_terminal_command")
-                        {
-                            if (toolCall.Function.Arguments.TryGetValue("command", out var commandElement))
-                            {
-                                var command = ((JsonElement)commandElement).GetString();
-                                _logger.LogInformation("LLM solicitou a execução do comando: {Command}", command);
-
-                                // Cria CancellationToken com Timeout de 30 segundos
-                                using var commandCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                                commandCts.CancelAfter(TimeSpan.FromSeconds(30));
-
-                                var commandOutput = await _terminalExecutor.ExecuteCommandAsync(command ?? string.Empty, commandCts.Token);
-                                _logger.LogInformation("Saída do terminal recebida. Tamanho: {Length} caracteres.", commandOutput.Length);
-
-                                // Retorna o resultado para o modelo como "tool" role
-                                messages.Add(new Message
-                                {
-                                    Role = "tool",
-                                    Content = commandOutput
-                                });
-                            }
-                        }
-                        else
-                        {
-                            _logger.LogWarning("LLM tentou invocar ferramenta desconhecida: {ToolName}", toolCall.Function.Name);
-                        }
-                    }
-                    
-                    // Continua o loop para reenviar as mensagens com a resposta da ferramenta,
-                    // permitindo que o modelo gere a resposta final em linguagem natural.
-                    continue;
-                }
-
-                // Quando não houver mais chamadas de ferramenta, é a resposta final
-                _logger.LogInformation("===============================================");
-                _logger.LogInformation("Resposta final do modelo:");
-                _logger.LogInformation("{Content}", responseMessage.Content);
-                _logger.LogInformation("===============================================");
-                
-                // Em um cenário real, poderíamos processar novos inputs do usuário.
-                // Neste exemplo, iremos encerrar ou pausar a iteração contínua para evitar loop infinito
                 break;
             }
-            catch (Exception ex)
+
+            messages.Add(new Message { Role = "user", Content = userInput });
+
+            bool isAssistantDone = false;
+            
+            // Loop interno para permitir múltiplas chamadas de ferramenta antes da resposta final
+            while (!isAssistantDone && !stoppingToken.IsCancellationRequested)
             {
-                _logger.LogError(ex, "Falha durante o ciclo de comunicação com o LLM.");
-                await Task.Delay(5000, stoppingToken);
+                try
+                {
+                    var request = new ChatRequest
+                    {
+                        Model = _ollamaModel,
+                        Messages = messages,
+                        Tools = tools,
+                        Stream = false
+                    };
+
+                    var responseMessage = await SendChatRequestAsync(request, stoppingToken);
+                    
+                    if (responseMessage == null)
+                    {
+                        _logger.LogWarning("Nenhuma resposta foi retornada pela API. Tentando novamente.");
+                        await Task.Delay(2000, stoppingToken);
+                        continue;
+                    }
+
+                    messages.Add(responseMessage);
+
+                    if (responseMessage.ToolCalls != null && responseMessage.ToolCalls.Any())
+                    {
+                        foreach (var toolCall in responseMessage.ToolCalls)
+                        {
+                            if (toolCall.Function.Name == "execute_terminal_command")
+                            {
+                                if (toolCall.Function.Arguments.TryGetValue("command", out var commandElement))
+                                {
+                                    var command = ((JsonElement)commandElement).GetString();
+                                    
+                                    Console.ForegroundColor = ConsoleColor.Yellow;
+                                    Console.WriteLine($"\n[LLM rodando comando]: {command}");
+                                    Console.ResetColor();
+
+                                    using var commandCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                                    commandCts.CancelAfter(TimeSpan.FromMinutes(2)); // Maior timeout genérico
+
+                                    var commandOutput = await _terminalExecutor.ExecuteCommandAsync(command ?? string.Empty, commandCts.Token);
+
+                                    messages.Add(new Message
+                                    {
+                                        Role = "tool",
+                                        Content = commandOutput
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // O LLM respondeu com texto e finalizou o raciocínio
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.WriteLine($"\n[Assistente]:\n{responseMessage.Content}");
+                        Console.ResetColor();
+                        isAssistantDone = true; // Quebra o loop interno para pedir novo input ao usuário
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Erro de comunicação com Ollama.");
+                    break;
+                }
             }
         }
     }
