@@ -74,6 +74,16 @@ public class Worker : BackgroundService
 
             var userInput = await Task.Run(() => Console.ReadLine(), stoppingToken);
             
+            // Se userInput for null, significa que a stream de entrada padrão (stdin) foi fechada.
+            // Isso acontece ao rodar no Docker sem a flag -i (interativo). 
+            // Para não gerar loop infinito, pausamos a execução do Worker até ele ser encerrado.
+            if (userInput == null)
+            {
+                _logger.LogWarning("Standard Input (stdin) foi fechado. Rodando em modo daemon sem TTY.");
+                await Task.Delay(Timeout.Infinite, stoppingToken);
+                break;
+            }
+
             if (string.IsNullOrWhiteSpace(userInput)) continue;
             if (userInput.Equals("sair", StringComparison.OrdinalIgnoreCase) || userInput.Equals("exit", StringComparison.OrdinalIgnoreCase))
             {
